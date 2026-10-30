@@ -1,0 +1,20 @@
+{
+  "_comment": [
+    "Copy to dart_define.json and fill in, then run:",
+    "  flutter run --dart-define-from-file=dart_define.json",
+    "SUPABASE_ANON_KEY is the 'anon public' key from Project Settings -> API.",
+    "It is designed to ship in the client: it only grants what the RLS policies",
+    "in supabase/migrations/0002_rls.sql allow.",
+    "Never put the service_role key here — it bypasses RLS entirely."
+  ],
+
+  "SUPABASE_URL": "https://<your-project-ref>.supabase.co",
+  "SUPABASE_ANON_KEY": "<anon-public-key>",
+
+  "_optional_comment": [
+    "Optional. Without these the MPN lookup falls back to the deterministic",
+    "offline catalogue, which is enough to use the app end to end."
+  ],
+  "DIGIKEY_CLIENT_ID": "",
+  "DIGIKEY_CLIENT_SECRET": ""
+}

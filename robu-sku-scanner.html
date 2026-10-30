@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Robu.in SKU Scanner</title>
+<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<style>
+  :root{--bg:#0f1419;--card:#1a222c;--card2:#222d3a;--acc:#4da3ff;--ok:#3ecf8e;--warn:#ffb648;--err:#ff6b6b;--txt:#e8eef5;--mut:#8ba0b5}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;padding-bottom:90px}
+  header{padding:14px 16px 8px;font-size:20px;font-weight:700}
+  header small{display:block;font-size:12px;color:var(--mut);font-weight:400}
+  .pad{padding:0 14px}
+  .row{display:flex;gap:8px;margin:10px 0}
+  input[type=text]{flex:1;min-width:0;background:var(--card);border:1px solid #33414f;border-radius:10px;color:var(--txt);padding:13px 14px;font-size:16px}
+  button{border:0;border-radius:10px;padding:13px 16px;font-size:15px;font-weight:600;color:#fff;background:var(--acc);cursor:pointer}
+  button:active{transform:scale(.97)}
+  button.sec{background:var(--card2);color:var(--txt)}
+  button.big{width:100%;padding:15px;font-size:16px;margin-top:6px}
+  .grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+  .hint{font-size:12px;color:var(--mut);margin:4px 0 0}
+  .item{background:var(--card);border-radius:12px;padding:12px 14px;margin:8px 0;border-left:4px solid var(--mut)}
+  .item.ok{border-left-color:var(--ok)} .item.err{border-left-color:var(--err)} .item.work{border-left-color:var(--acc)} .item.warn{border-left-color:var(--warn)}
+  .item .t{font-weight:700;word-break:break-word}
+  .item .s{font-size:12px;color:var(--mut);margin-top:2px}
+  .item .price{color:var(--ok);font-weight:600}
+  .item .oos{color:var(--err);font-weight:600}
+  details{margin-top:8px;font-size:13px}
+  summary{color:var(--acc);cursor:pointer;padding:6px 0}
+  details .kv{white-space:pre-wrap;word-break:break-word;color:var(--txt);background:var(--bg);border-radius:8px;padding:10px;margin-top:4px}
+  .badge{display:inline-block;font-size:11px;padding:2px 8px;border-radius:20px;background:var(--card2);color:var(--mut);margin-left:6px;vertical-align:middle}
+  #bar{position:fixed;left:0;right:0;bottom:0;background:#10181fee;backdrop-filter:blur(6px);border-top:1px solid #2a3745;display:flex;gap:10px;padding:10px 14px;align-items:center;z-index:20}
+  #bar .cnt{flex:1;color:var(--mut);font-size:13px}
+  #cam{position:fixed;inset:0;background:#000d;z-index:50;display:none;flex-direction:column}
+  #cam video{width:100%;flex:1;object-fit:cover}
+  #cam .bar2{padding:14px;display:flex;gap:10px;background:#000}
+  #cam .hint{color:#9fb2c5;text-align:center;padding:6px}
+  #toast{position:fixed;top:10px;left:50%;transform:translateX(-50%);background:var(--card2);padding:10px 18px;border-radius:30px;font-size:14px;display:none;z-index:60;max-width:90vw}
+  .secTitle{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:18px 0 4px}
+  .thumb{width:44px;height:44px;object-fit:cover;border-radius:8px;float:right;margin-left:8px}
+</style>
+</head>
+<body>
+<header>Robu.in SKU Scanner<small>Scan parcel barcode / photos → fetch product details → export CSV</small></header>
+
+<div class="pad">
+  <div class="row">
+    <input type="text" id="skuIn" placeholder="Type / paste SKUs: R184470, 574970 ..." autocomplete="off">
+    <button id="addBtn">Add</button>
+  </div>
+  <div class="hint">Accepts multiple SKUs separated by space, comma or newline.</div>
+
+  <div class="grid">
+    <button class="sec" id="camBtn">&#9679; Live scan</button>
+    <button class="sec" id="capBtn">&#128247; Capture</button>
+    <button class="sec" id="upBtn">&#128247; Upload</button>
+  </div>
+  <input type="file" id="fileUp" accept="image/*" multiple hidden>
+  <input type="file" id="fileCap" accept="image/*" capture="environment" hidden>
+  <div class="hint">Capture/Upload: each photo is decoded for a barcode, then OCR'd for the printed SKU. Tap Capture again for more photos.</div>
+
+  <div class="secTitle">Results</div>
+  <div id="list"></div>
+</div>
+
+<div id="bar">
+  <div class="cnt" id="stat">0 products fetched</div>
+  <button id="csvBtn">Export CSV</button>
+  <button class="sec" id="clrBtn">Clear</button>
+</div>
+
+<div id="cam">
+  <video id="vid" playsinline muted></video>
+  <div class="hint">Point at a barcode. Keeps scanning — shows a toast for each SKU found.</div>
+  <div class="bar2"><button class="big sec" id="camClose">Close camera</button></div>
+</div>
+<div id="toast"></div>
+
+<script>
+//>>TEST-BEGIN
+/* Pure functions (no DOM) — also exercised by the node test harness. */
+
+const SKU_RE = /(?:\bR\d{6}\b|\b\d{6,7}\b)/gi;
+
+// Pull SKU candidates out of arbitrary OCR/barcode text, best first.
+function extractSKUs(text){
+  if(!text) return [];
+  const out=[], seen=new Set();
+  for(const m of text.matchAll(SKU_RE)){
+    let s=m[0].toUpperCase();
+    if(seen.has(s)) continue; seen.add(s); out.push(s);
+  }
+  // R-prefixed SKUs are almost certainly the product SKU; bare 6-7 digit
+  // hits could be PIN codes / phone fragments — try R-codes first.
+  return out.sort((a,b)=>(b[0]==='R')-(a[0]==='R'));
+}
+
+// Parse robu.in search-page markdown (r.jina.ai format) into [{title,url,sku}]
+function parseSearch(md){
+  const res=[];
+  const re=/####\s*\[([^\]]+)\]\((https:\/\/robu\.in\/product\/[^)\s]+)\)([\s\S]*?)#####\s*SKU:\s*([A-Za-z0-9-]+)/g;
+  let m;
+  while((m=re.exec(md))) res.push({title:m[1].trim(), url:m[2], sku:m[4].trim()});
+  // looser fallback: pair each product link with the next SKU line
+  if(!res.length){
+    const lines=md.split('\n'); let last=null;
+    for(const l of lines){
+      const u=l.match(/\((https:\/\/robu\.in\/product\/[^)\s]+)\)/);
+      if(u) last=u[1];
+      const s=l.match(/^#+\s*SKU:\s*(\S+)/);
+      if(s&&last){res.push({title:'',url:last,sku:s[1]});last=null;}
+    }
+  }
+  return res;
+}
+
+const stripMd = s => s.replace(/!\[[^\]]*\]\([^)]*\)/g,'')
+                      .replace(/\[([^\]]*)\]\([^)]*\)/g,'$1').trim();
+
+// Parse product-page markdown into structured data.
+function parseProduct(md){
+  const lines=md.split('\n');
+  const P={name:'',sku:'',price:'',availability:'',mpn:'',brand:'',
+           highlights:[],description:'',specs:[]};
+  for(let i=0;i<lines.length;i++){
+    const l=lines[i];
+    const t=l.trim();
+    if(t.startsWith('|')||t.startsWith('Add to Cart')||t.startsWith("Didn")||t.startsWith('*   ##')) break;
+    if(!P.name && l.startsWith('# ')) P.name=stripMd(l.slice(2));
+    if(l.startsWith('SKU:')) P.sku=l.slice(4).trim();
+    if(!P.price && /^₹/.test(t)) P.price=t;
+    if(l.startsWith('Availability:')) P.availability=l.split(':')[1].trim();
+    if(l.startsWith('MPN:')) P.mpn=stripMd(l.slice(4));
+    if(l.startsWith('Brand:')) P.brand=stripMd(l.slice(6));
+    const h=l.match(/^\s*\d+\.\s+(.*)/);
+    if(h && stripMd(h[1])) P.highlights.push(stripMd(h[1]));
+  }
+  // description: standalone "Description" line -> "Specification" line
+  let di=-1, si=-1;
+  for(let j=0;j<lines.length;j++){
+    const t=lines[j].trim();
+    if(di===-1 && t==='Description' && j>50) di=j;
+    else if(di!==-1 && si===-1 && t==='Specification'){si=j;break;}
+  }
+  if(di!==-1){
+    const end=si===-1?Math.min(di+60,lines.length):si;
+    const d=[];
+    for(let j=di+1;j<end;j++){
+      const t=stripMd(lines[j]);
+      if(t && t!=='* * *') d.push(t);
+    }
+    P.description=d.join(' | ');
+  }
+  if(si!==-1){
+    for(let j=si+1;j<lines.length;j++){
+      const t=lines[j].trim();
+      if(['Warranty','Reviews'].includes(t) || t.startsWith('Shipping Weight') ||
+         t.startsWith('Shipping Dimensions') || t.startsWith('###')) break;
+      const c=stripMd(lines[j]);
+      if(c && c.includes(':')) P.specs.push(c);
+    }
+  }
+  return P;
+}
+
+const csvCell = v => '"'+String(v??'').replace(/"/g,'""')+'"';
+function toCSV(rows){
+  const head=['SKU','Name','MPN','Brand','Price (INR)','Availability','Highlights','Description','Specification','URL'];
+  const out=[head.join(',')];
+  for(const r of rows){
+    out.push([r.sku,r.name,r.mpn,r.brand,r.price,r.availability,
+      (r.highlights||[]).join('; '),r.description,(r.specs||[]).join('; '),r.url]
+      .map(csvCell).join(','));
+  }
+  return '﻿'+out.join('\r\n');   // leading ﻿ = BOM so Excel reads UTF-8
+}
+//>>TEST-END
+
+/* ------------------------------ app ------------------------------ */
+const $=id=>document.getElementById(id);
+const results=new Map();          // sku -> record
+const seenImgs=new Set();         // dedupe identical captures by name+size
+const JINA='https://r.jina.ai/';
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+
+function toast(msg,ms=2200){const t=$('toast');t.textContent=msg;t.style.display='block';
+  clearTimeout(t._h);t._h=setTimeout(()=>t.style.display='none',ms);}
+
+function card(sku){
+  let el=document.querySelector(`[data-sku="${sku}"]`);
+  if(!el){
+    el=document.createElement('div');el.className='item work';el.dataset.sku=sku;
+    el.innerHTML=`<div class="t">${sku}<span class="badge">queued</span></div><div class="s"></div>`;
+    $('list').prepend(el);
+  }
+  return el;
+}
+function setStatus(sku,cls,title,sub,extra=''){
+  const el=card(sku);
+  el.className='item '+cls;
+  el.querySelector('.t').innerHTML=title+(extra?`<span class="badge">${extra}</span>`:'');
+  el.querySelector('.s').innerHTML=sub||'';
+}
+function renderDone(r){
+  const el=card(r.sku);
+  el.className='item '+(r.ok?'ok':(r.notFound?'warn':'err'));
+  const price=r.price?`<span class="price">${r.price}</span>`:'';
+  const av=r.availability?` · <span class="${/out/i.test(r.availability)?'oos':'price'}">${r.availability}</span>`:'';
+  el.querySelector('.t').innerHTML=`${r.sku} — ${r.name||'(not found)'}`;
+  el.querySelector('.s').innerHTML=(r.ok?price+av:r.message||'');
+  if(r.ok){
+    const d=document.createElement('details');
+    d.innerHTML=`<summary>Details</summary><div class="kv">`+
+      `Highlights:\n${(r.highlights||[]).map(x=>' • '+x).join('\n')||' -'}\n\n`+
+      `Description:\n${r.description||'-'}\n\n`+
+      `Specification:\n${(r.specs||[]).join('\n')||'-'}\n\n${r.url}</div>`;
+    el.appendChild(d);
+  }
+  $('stat').textContent=`${[...results.values()].filter(x=>x.ok).length} products fetched · ${results.size} total`;
+}
+
+async function jina(url,tries=4){
+  for(let i=0;i<tries;i++){
+    try{
+      const r=await fetch(JINA+url);
+      if(r.status===429||r.status>=500){await sleep(1500*(i+1));continue;}
+      const t=await r.text();
+      if(/just a moment|security verification|enable javascript/i.test(t)){await sleep(2500*(i+1));continue;}
+      return t;
+    }catch(e){await sleep(1500*(i+1));}
+  }
+  throw new Error('fetch blocked/rate-limited');
+}
+
+async function lookupSKU(sku){
+  if(results.has(sku)) {setStatus(sku,'work',sku,'already in list');return;}
+  results.set(sku,{sku,ok:false});
+  setStatus(sku,'work',sku,'searching robu.in…','working');
+  try{
+    const smd=await jina(`https://robu.in/?s=${encodeURIComponent(sku)}&post_type=product`);
+    const hits=parseSearch(smd);
+    let hit=hits.find(h=>h.sku.toUpperCase()===sku.toUpperCase())||hits[0];
+    if(!hit){
+      const r={sku,ok:false,notFound:true,message:'no product found on robu.in'};
+      results.set(sku,r);renderDone(r);return;
+    }
+    setStatus(sku,'work',sku,'found: '+hit.url.split('/product/')[1].slice(0,40)+'…','working');
+    const pmd=await jina(hit.url);
+    const p=parseProduct(pmd);
+    const r={sku,url:hit.url,...p,ok:!!p.name,notFound:!p.name,
+             message:p.name?'':'product page parsed empty'};
+    if(r.name) results.set(sku,r); else results.set(sku,{sku,ok:false,notFound:true,message:'parse failed — page may be blocked'});
+    renderDone(results.get(sku));
+  }catch(e){
+    const r={sku,ok:false,message:String(e.message||e)};results.set(sku,r);renderDone(r);
+  }
+}
+
+// simple concurrency pool
+async function pool(items,n,fn){
+  const q=[...items];
+  await Promise.all(Array.from({length:n},async()=>{
+    while(q.length) await fn(q.shift());
+  }));
+}
+
+function addSKUs(text){
+  const list=extractSKUs(text);
+  if(!list.length){toast('No SKU pattern found');return;}
+  pool(list,2,lookupSKU);
+  toast(list.length+' SKU(s) queued');
+}
+
+/* ---------------- barcode + OCR ---------------- */
+const zxing=(window.ZXing)?new ZXing.BrowserMultiFormatReader():null;
+const hasBD='BarcodeDetector' in window;
+let bd=null;
+if(hasBD){try{bd=new BarcodeDetector({formats:['code_128','code_39','ean_13','ean_8','qr_code','data_matrix','upc_a','upc_e','itf','codabar','pdf417']});}catch(e){bd=null;}}
+
+async function decodeBarcode(source){ // source: HTMLImageElement | HTMLCanvasElement | blob url string
+  if(bd){try{const r=await bd.detect(source);if(r&&r.length)return r.map(x=>x.rawValue);}catch(e){}}
+  if(!zxing) return [];
+  try{
+    let url=source;
+    if(typeof source!=='string'){
+      if(!(source instanceof HTMLImageElement)){
+        const c=document.createElement('canvas');c.width=source.videoWidth||source.width;c.height=source.videoHeight||source.height;
+        c.getContext('2d').drawImage(source,0,0);source=c;
+      }
+      url=source.src||source.toDataURL();
+    }
+    const r=await zxing.decodeFromImageUrl(url);
+    return r?[r.getText()]:[];
+  }catch(e){return [];}
+}
+
+let ocrWorker=null,ocrBusy=Promise.resolve();
+async function ocr(img){
+  // serialize OCR (single worker) — heavy on mobile
+  const job=ocrBusy.then(async()=>{
+    if(!window.Tesseract) throw new Error('OCR lib not loaded (offline?)');
+    if(!ocrWorker) ocrWorker=await Tesseract.createWorker('eng');
+    const {data}=await ocrWorker.recognize(img);
+    return data.text||'';
+  });
+  ocrBusy=job.catch(()=>{});
+  return job;
+}
+
+function loadImg(fileOrBlob){
+  return new Promise((res,rej)=>{
+    const url=URL.createObjectURL(fileOrBlob);
+    const im=new Image();
+    im.onload=()=>res(im);im.onerror=rej;im.src=url;
+  });
+}
+
+async function processImage(file){
+  const key=file.name+'_'+file.size;
+  if(seenImgs.has(key)) return; seenImgs.add(key);
+  const tag=file.name||'photo';
+  toast('Processing '+tag+'…');
+  try{
+    const img=await loadImg(file);
+    let found=[];
+    const codes=await decodeBarcode(img);          // pass 1: barcode
+    for(const c of codes) found.push(...extractSKUs(c));
+    if(!found.length){
+      const txt=await ocr(img);                    // pass 2: OCR the label
+      found.push(...extractSKUs(txt));
+    }
+    found=[...new Set(found)];
+    if(!found.length){toast(tag+': no SKU found',3000);return;}
+    toast(tag+': '+found.join(', '),3000);
+    pool(found.slice(0,3),2,lookupSKU);            // try up to 3 candidates
+  }catch(e){toast(tag+': '+e.message,3000);}
+}
+
+/* ---------------- live camera ---------------- */
+let camOn=false;
+async function openCam(){
+  if(!zxing){toast('Scanner lib not loaded — check connection',3000);return;}
+  $('cam').style.display='flex';camOn=true;
+  try{
+    await zxing.decodeFromVideoDevice(undefined,$('vid'),(res,err)=>{
+      if(res&&camOn){
+        const skus=extractSKUs(res.getText());
+        if(skus.length){skus.forEach(s=>{if(!results.has(s)){toast('Scanned '+s);lookupSKU(s);}});}
+      }
+    });
+  }catch(e){
+    toast('Camera failed: '+(e.message||e),3500);closeCam();
+  }
+}
+function closeCam(){camOn=false;try{zxing.reset();}catch(e){}
+  const v=$('vid');if(v.srcObject)v.srcObject.getTracks().forEach(t=>t.stop());
+  $('cam').style.display='none';}
+
+/* ---------------- wiring ---------------- */
+$('addBtn').onclick=()=>{addSKUs($('skuIn').value);$('skuIn').value='';};
+$('skuIn').addEventListener('keydown',e=>{if(e.key==='Enter')$('addBtn').click();});
+$('upBtn').onclick=()=>$('fileUp').click();
+$('capBtn').onclick=()=>$('fileCap').click();
+$('camBtn').onclick=openCam;
+$('camClose').onclick=closeCam;
+$('fileUp').onchange=e=>{pool([...e.target.files],2,processImage);e.target.value='';};
+$('fileCap').onchange=e=>{pool([...e.target.files],2,processImage);e.target.value='';};
+$('clrBtn').onclick=()=>{results.clear();seenImgs.clear();$('list').innerHTML='';$('stat').textContent='0 products fetched';};
+
+// Live scan needs a secure context (https/localhost). Over plain http on a
+// phone the browser blocks the camera — disable the button and say why.
+if(!window.isSecureContext){
+  const b=$('camBtn');b.disabled=true;b.style.opacity=.5;
+  b.innerHTML='&#9679; Live scan<br><span style="font-size:10px;font-weight:400">needs HTTPS — use Capture</span>';
+}
+$('csvBtn').onclick=()=>{
+  const rows=[...results.values()].filter(r=>r.ok);
+  if(!rows.length){toast('Nothing to export');return;}
+  const blob=new Blob([toCSV(rows)],{type:'text/csv;charset=utf-8'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='robu_skus_'+new Date().toISOString().slice(0,10)+'.csv';
+  a.click();URL.revokeObjectURL(a.href);
+};
+</script>
+</body>
+</html>
